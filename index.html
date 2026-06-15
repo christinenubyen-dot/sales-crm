@@ -513,6 +513,71 @@ main {
   justify-content: space-between;
 }
 
+/* Jira ticket block on retailer cards */
+.jira-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--grey-200);
+}
+.jira-linked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.jira-key-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #0C447C;
+  background: #E6F1FB;
+  border: 1px solid #B5D4F4;
+  border-radius: 6px;
+  padding: 2px 8px;
+  text-decoration: none;
+}
+.jira-key-link:hover { background: #B5D4F4; }
+.jira-status-chip {
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 2px 9px;
+  background: var(--grey-100);
+  color: var(--grey-600);
+}
+.jira-status-chip.done { background: #E1F5EE; color: #0F6E56; }
+.jira-status-chip.progress { background: #FAEEDA; color: #854F0B; }
+.jira-title-line {
+  font-size: 12px;
+  color: #4B5563;
+  margin-top: 6px;
+  width: 100%;
+}
+.jira-refresh {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--grey-600);
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.jira-refresh:hover { background: var(--grey-100); color: var(--navy); }
+.jira-create-btn {
+  font-size: 12px;
+  color: #0C447C;
+  background: #E6F1FB;
+  border: 1px solid #B5D4F4;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.jira-create-btn:hover { background: #B5D4F4; }
+.jira-create-btn:disabled { opacity: 0.6; cursor: default; }
+
 /* Pre-engagement checklist */
 .pre-engage {
   margin-top: 12px;
@@ -1468,6 +1533,10 @@ function migrate(parsed) {
   const newFields = ["rapport","gifting","meeting","samples","stocked","reorderMonth","reorderQuarter","marginReview"];
   (parsed.retailers || []).forEach(r => {
     newFields.forEach(f => { if (r[f] === undefined) r[f] = ""; });
+    if (r.jiraKey === undefined) r.jiraKey = "";
+    if (r.jiraUrl === undefined) r.jiraUrl = "";
+    if (r.jiraTitle === undefined) r.jiraTitle = "";
+    if (r.jiraStatus === undefined) r.jiraStatus = "";
     if (!Array.isArray(r.orders)) r.orders = [];
   });
   if (!parsed.touchpoints) parsed.touchpoints = [];
@@ -1555,6 +1624,85 @@ async function pullFromCloud(showToast) {
 
 function nextId(list) {
   return list.length ? Math.max(...list.map(x => x.id)) + 1 : 1;
+}
+
+// =====================================================
+// JIRA INTEGRATION (proxied through Apps Script)
+// =====================================================
+// Default project key + issue type for tickets created from a retailer.
+// Change JIRA_PROJECT_KEY to your project's prefix (e.g. "SALES").
+const JIRA_PROJECT_KEY = "SC";
+const JIRA_ISSUE_TYPE  = "Task";
+
+// Create a Jira ticket for a retailer. Resolves to { key, url, title, status }.
+async function jiraCreateTicket(retailer) {
+  if (!cloudEnabled) throw new Error("Cloud sync is off — Jira needs the Apps Script backend.");
+  const summary = "Retailer: " + (retailer.name || "Untitled");
+  const descLines = [
+    "Auto-created from the Sales CRM.",
+    "",
+    "Retailer: " + (retailer.name || ""),
+    "Region: " + (retailer.region || "—"),
+    "Stage: " + (retailer.stage || "—"),
+    "Status: " + (retailer.status || "—"),
+    "Contacts: " + (retailer.contacts || "—"),
+  ];
+  if (retailer.notes) descLines.push("", "Notes: " + retailer.notes);
+
+  const res = await fetch(SHEETS_API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({
+      token: SHEETS_API_TOKEN,
+      action: "jiraCreate",
+      data: {
+        projectKey: JIRA_PROJECT_KEY,
+        issueType: JIRA_ISSUE_TYPE,
+        summary: summary,
+        description: descLines.join("\n"),
+      },
+    }),
+  });
+  const json = await res.json();
+  if (!json || !json.ok) throw new Error(json && json.error ? json.error : "Jira create failed");
+  return json.issue;
+}
+
+// Fetch live title + status for an issue key. Resolves to { key, url, title, status }.
+async function jiraGetIssue(issueKey) {
+  if (!cloudEnabled) throw new Error("Cloud sync is off.");
+  const url = SHEETS_API_URL
+    + "?token=" + encodeURIComponent(SHEETS_API_TOKEN)
+    + "&action=jiraGet&issueKey=" + encodeURIComponent(issueKey);
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!json || !json.ok) throw new Error(json && json.error ? json.error : "Jira read failed");
+  return json.issue;
+}
+
+// Refresh stored title/status for every retailer that has a linked ticket.
+// Runs quietly in the background on load; updates state + re-renders if changed.
+async function refreshAllJiraStatuses() {
+  if (!cloudEnabled) return;
+  const linked = state.retailers.filter(r => r.jiraKey);
+  if (!linked.length) return;
+  let changed = false;
+  for (const r of linked) {
+    try {
+      const issue = await jiraGetIssue(r.jiraKey);
+      if (issue.title !== r.jiraTitle || issue.status !== r.jiraStatus) {
+        r.jiraTitle = issue.title;
+        r.jiraStatus = issue.status;
+        changed = true;
+      }
+    } catch (e) {
+      console.warn("Jira refresh failed for " + r.jiraKey, e);
+    }
+  }
+  if (changed) {
+    saveState();
+    if (document.querySelector(".tab.active")?.id === "tab-retailers") renderRetailers();
+  }
 }
 
 // =====================================================
@@ -1985,6 +2133,37 @@ function openPersonModal(p) {
 // =====================================================
 const STAGES = ["Linesheet", "Look book", "Pricing", "Sample", "Negotiation", "Order placed", "Shipped"];
 
+function jiraStatusClass(status) {
+  const s = (status || "").toLowerCase();
+  if (s.includes("done") || s.includes("closed") || s.includes("complete") || s.includes("resolved")) return "done";
+  if (s.includes("progress") || s.includes("review") || s.includes("doing")) return "progress";
+  return "";
+}
+
+function jiraBlockHtml(r) {
+  if (r.jiraKey) {
+    const chip = r.jiraStatus
+      ? `<span class="jira-status-chip ${jiraStatusClass(r.jiraStatus)}">${escapeHtml(r.jiraStatus)}</span>`
+      : `<span class="jira-status-chip">No status yet</span>`;
+    const title = r.jiraTitle
+      ? `<div class="jira-title-line">${escapeHtml(r.jiraTitle)}</div>`
+      : "";
+    return `
+      <div class="jira-block" data-jira-block>
+        <div class="jira-linked">
+          <a class="jira-key-link" href="#" data-jira-open title="Open ticket in Jira">⎘ ${escapeHtml(r.jiraKey)}</a>
+          ${chip}
+          <button type="button" class="jira-refresh" data-jira-refresh title="Refresh title & status">↻</button>
+          ${title}
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="jira-block" data-jira-block>
+      <button type="button" class="jira-create-btn" data-jira-create>+ Create Jira ticket</button>
+    </div>`;
+}
+
 function renderRetailers() {
   const filtered = state.retailers.filter(r => matchesSearch(r, searchTerm));
   const html = filtered.length ? filtered.map(r => {
@@ -2062,6 +2241,7 @@ function renderRetailers() {
           <span><strong>${escapeHtml(r.stage || "")}</strong></span>
         </div>
         ${orderSummary}
+        ${jiraBlockHtml(r)}
       </div>
     `;
   }).join("") : `<div class="empty">No retailers yet.</div>`;
@@ -2077,9 +2257,77 @@ function renderRetailers() {
         openPersonModal(state.people.find(p => p.id === personId));
         return;
       }
+      // Jira controls act in place — don't open the retailer modal
+      const jiraOpen = e.target.closest("[data-jira-open]");
+      const jiraCreate = e.target.closest("[data-jira-create]");
+      const jiraRefresh = e.target.closest("[data-jira-refresh]");
+      if (jiraOpen || jiraCreate || jiraRefresh) {
+        e.stopPropagation();
+        e.preventDefault();
+        const r = state.retailers.find(x => x.id == c.dataset.id);
+        if (!r) return;
+        if (jiraOpen) handleJiraOpen(r);
+        else if (jiraCreate) handleJiraCreate(r, jiraCreate);
+        else if (jiraRefresh) handleJiraRefresh(r, jiraRefresh);
+        return;
+      }
       openRetailerModal(state.retailers.find(r => r.id == c.dataset.id));
     });
   });
+}
+
+function handleJiraOpen(r) {
+  if (r.jiraUrl) { window.open(r.jiraUrl, "_blank", "noopener"); return; }
+  // Fall back to building the browse URL from the base if we only stored the key.
+  jiraGetIssue(r.jiraKey).then(issue => {
+    r.jiraUrl = issue.url;
+    window.open(issue.url, "_blank", "noopener");
+  }).catch(() => toast("Couldn't open ticket"));
+}
+
+async function handleJiraCreate(r, btn) {
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+  try {
+    const issue = await jiraCreateTicket(r);
+    r.jiraKey = issue.key;
+    r.jiraUrl = issue.url;
+    r.jiraTitle = issue.title;
+    r.jiraStatus = issue.status;
+    saveState();
+    renderRetailers();
+    toast("Created " + issue.key);
+  } catch (e) {
+    console.warn(e);
+    btn.disabled = false;
+    btn.textContent = "+ Create Jira ticket";
+    toast(jiraErrorText(e));
+  }
+}
+
+async function handleJiraRefresh(r, btn) {
+  const original = btn.textContent;
+  btn.textContent = "…";
+  try {
+    const issue = await jiraGetIssue(r.jiraKey);
+    r.jiraTitle = issue.title;
+    r.jiraStatus = issue.status;
+    r.jiraUrl = issue.url;
+    saveState();
+    renderRetailers();
+    toast("Updated " + issue.key);
+  } catch (e) {
+    console.warn(e);
+    btn.textContent = original;
+    toast(jiraErrorText(e));
+  }
+}
+
+function jiraErrorText(e) {
+  const msg = String(e && e.message ? e.message : e);
+  if (msg.includes("not configured")) return "Jira isn't set up in Script Properties yet";
+  if (msg.includes("not found")) return "That ticket no longer exists in Jira";
+  return "Jira error — check the console";
 }
 
 function retailerForm(r) {
@@ -2602,14 +2850,19 @@ function renderAll() {
 // =====================================================
 const syncBtn = document.getElementById("syncBtn");
 if (syncBtn) {
-  syncBtn.addEventListener("click", () => pullFromCloud(true));
+  syncBtn.addEventListener("click", async () => {
+    await pullFromCloud(true);
+    refreshAllJiraStatuses();   // also refresh linked Jira tickets
+  });
 }
 
 renderDashboard();
 
 if (cloudEnabled) {
   setSyncStatus("saving", "Connecting…");
-  pullFromCloud(false);   // refresh from Sheets on load
+  pullFromCloud(false).then(() => {
+    refreshAllJiraStatuses();   // refresh Jira title/status on load
+  });
 } else {
   setSyncStatus("off", "Local only");
 }
