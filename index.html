@@ -513,17 +513,52 @@ main {
   justify-content: space-between;
 }
 
-/* Jira ticket block on retailer cards */
+/* Jira tickets block on retailer cards */
 .jira-block {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px dashed var(--grey-200);
 }
-.jira-linked {
+.jira-table-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.jira-table-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--grey-600);
+}
+.jira-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.jira-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--grey-600);
+  padding: 4px 8px 4px 0;
+  border-bottom: 1px solid var(--grey-200);
+}
+.jira-table td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--grey-100);
+  vertical-align: middle;
+}
+.jira-td-title {
+  color: #4B5563;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .jira-key-link {
   display: inline-flex;
@@ -537,24 +572,21 @@ main {
   border-radius: 6px;
   padding: 2px 8px;
   text-decoration: none;
+  white-space: nowrap;
 }
 .jira-key-link:hover { background: #B5D4F4; }
 .jira-status-chip {
+  display: inline-block;
   font-size: 11px;
   font-weight: 600;
   border-radius: 10px;
   padding: 2px 9px;
   background: var(--grey-100);
   color: var(--grey-600);
+  white-space: nowrap;
 }
 .jira-status-chip.done { background: #E1F5EE; color: #0F6E56; }
 .jira-status-chip.progress { background: #FAEEDA; color: #854F0B; }
-.jira-title-line {
-  font-size: 12px;
-  color: #4B5563;
-  margin-top: 6px;
-  width: 100%;
-}
 .jira-refresh {
   background: none;
   border: none;
@@ -1118,6 +1150,28 @@ main {
   border-radius: 0 0 14px 14px;
 }
 .modal-foot .right { display: flex; gap: 8px; }
+.modal.modal-sm { max-width: 440px; }
+.jira-modal-retailer {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--grey-600);
+  background: var(--grey-50);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 16px;
+}
+.jira-modal-error {
+  display: none;
+  font-size: 13px;
+  color: #B42318;
+  background: #FEF3F2;
+  border: 1px solid #FECDCA;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-top: 14px;
+}
+.jira-modal-error.show { display: block; }
 .field-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1351,6 +1405,33 @@ main {
   </div>
 </div>
 
+<div class="modal-backdrop" id="jiraModal">
+  <div class="modal modal-sm">
+    <div class="modal-head">
+      <h3>New Jira ticket</h3>
+      <button class="btn btn-ghost btn-sm" id="jiraModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="jira-modal-retailer" id="jiraModalRetailer"></div>
+      <div class="field full">
+        <label>Task name</label>
+        <input id="jiraTaskName" type="text" placeholder="e.g. Send linesheet to buyer" autocomplete="off">
+      </div>
+      <div class="field full">
+        <label>Issue type</label>
+        <select id="jiraIssueType"></select>
+      </div>
+      <div class="jira-modal-error" id="jiraModalError"></div>
+    </div>
+    <div class="modal-foot">
+      <div class="right">
+        <button class="btn" id="jiraModalCancel">Cancel</button>
+        <button class="btn btn-primary" id="jiraModalCreate">Create ticket</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1533,10 +1614,20 @@ function migrate(parsed) {
   const newFields = ["rapport","gifting","meeting","samples","stocked","reorderMonth","reorderQuarter","marginReview"];
   (parsed.retailers || []).forEach(r => {
     newFields.forEach(f => { if (r[f] === undefined) r[f] = ""; });
-    if (r.jiraKey === undefined) r.jiraKey = "";
-    if (r.jiraUrl === undefined) r.jiraUrl = "";
-    if (r.jiraTitle === undefined) r.jiraTitle = "";
-    if (r.jiraStatus === undefined) r.jiraStatus = "";
+    if (!Array.isArray(r.jiraTickets)) {
+      r.jiraTickets = [];
+      // Fold any pre-existing single ticket into the new array form.
+      if (r.jiraKey) {
+        r.jiraTickets.push({
+          key: r.jiraKey,
+          url: r.jiraUrl || "",
+          title: r.jiraTitle || "",
+          status: r.jiraStatus || "",
+        });
+      }
+    }
+    // Old flat fields are no longer used; clear them to avoid confusion.
+    delete r.jiraKey; delete r.jiraUrl; delete r.jiraTitle; delete r.jiraStatus;
     if (!Array.isArray(r.orders)) r.orders = [];
   });
   if (!parsed.touchpoints) parsed.touchpoints = [];
@@ -1635,11 +1726,13 @@ const JIRA_PROJECT_KEY = "SC";
 const JIRA_ISSUE_TYPE  = "Task";
 
 // Create a Jira ticket for a retailer. Resolves to { key, url, title, status }.
-async function jiraCreateTicket(retailer) {
+async function jiraCreateTicket(retailer, summaryText, issueType) {
   if (!cloudEnabled) throw new Error("Cloud sync is off — Jira needs the Apps Script backend.");
-  const summary = "Retailer: " + (retailer.name || "Untitled");
+  const summary = (summaryText && summaryText.trim())
+    ? summaryText.trim()
+    : "Retailer: " + (retailer.name || "Untitled");
   const descLines = [
-    "Auto-created from the Sales CRM.",
+    "Created from the Sales CRM.",
     "",
     "Retailer: " + (retailer.name || ""),
     "Region: " + (retailer.region || "—"),
@@ -1657,7 +1750,7 @@ async function jiraCreateTicket(retailer) {
       action: "jiraCreate",
       data: {
         projectKey: JIRA_PROJECT_KEY,
-        issueType: JIRA_ISSUE_TYPE,
+        issueType: (issueType && issueType.trim()) ? issueType.trim() : JIRA_ISSUE_TYPE,
         summary: summary,
         description: descLines.join("\n"),
       },
@@ -1665,7 +1758,22 @@ async function jiraCreateTicket(retailer) {
   });
   const json = await res.json();
   if (!json || !json.ok) throw new Error(json && json.error ? json.error : "Jira create failed");
+  if (!json.issue || !json.issue.key) {
+    throw new Error("Backend didn't return a ticket. Redeploy Code.gs as a new version (it may not have the Jira actions yet).");
+  }
   return json.issue;
+}
+
+// Fetch valid issue type names for the configured project. Resolves to [names].
+async function jiraFetchTypes() {
+  if (!cloudEnabled) throw new Error("Cloud sync is off.");
+  const url = SHEETS_API_URL
+    + "?token=" + encodeURIComponent(SHEETS_API_TOKEN)
+    + "&action=jiraTypes&projectKey=" + encodeURIComponent(JIRA_PROJECT_KEY);
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!json || !json.ok) throw new Error(json && json.error ? json.error : "Couldn't load issue types");
+  return Array.isArray(json.types) ? json.types : [];
 }
 
 // Fetch live title + status for an issue key. Resolves to { key, url, title, status }.
@@ -1677,26 +1785,33 @@ async function jiraGetIssue(issueKey) {
   const res = await fetch(url);
   const json = await res.json();
   if (!json || !json.ok) throw new Error(json && json.error ? json.error : "Jira read failed");
+  if (!json.issue || !json.issue.key) {
+    throw new Error("Backend didn't return a ticket. Redeploy Code.gs as a new version.");
+  }
   return json.issue;
 }
 
-// Refresh stored title/status for every retailer that has a linked ticket.
+// Refresh stored title/status for every linked ticket across all retailers.
 // Runs quietly in the background on load; updates state + re-renders if changed.
 async function refreshAllJiraStatuses() {
   if (!cloudEnabled) return;
-  const linked = state.retailers.filter(r => r.jiraKey);
+  const linked = state.retailers.filter(r => Array.isArray(r.jiraTickets) && r.jiraTickets.length);
   if (!linked.length) return;
   let changed = false;
   for (const r of linked) {
-    try {
-      const issue = await jiraGetIssue(r.jiraKey);
-      if (issue.title !== r.jiraTitle || issue.status !== r.jiraStatus) {
-        r.jiraTitle = issue.title;
-        r.jiraStatus = issue.status;
-        changed = true;
+    for (const t of r.jiraTickets) {
+      if (!t.key) continue;
+      try {
+        const issue = await jiraGetIssue(t.key);
+        if (issue.title !== t.title || issue.status !== t.status) {
+          t.title = issue.title;
+          t.status = issue.status;
+          t.url = issue.url;
+          changed = true;
+        }
+      } catch (e) {
+        console.warn("Jira refresh failed for " + t.key, e);
       }
-    } catch (e) {
-      console.warn("Jira refresh failed for " + r.jiraKey, e);
     }
   }
   if (changed) {
@@ -2141,26 +2256,41 @@ function jiraStatusClass(status) {
 }
 
 function jiraBlockHtml(r) {
-  if (r.jiraKey) {
-    const chip = r.jiraStatus
-      ? `<span class="jira-status-chip ${jiraStatusClass(r.jiraStatus)}">${escapeHtml(r.jiraStatus)}</span>`
-      : `<span class="jira-status-chip">No status yet</span>`;
-    const title = r.jiraTitle
-      ? `<div class="jira-title-line">${escapeHtml(r.jiraTitle)}</div>`
-      : "";
+  const tickets = Array.isArray(r.jiraTickets) ? r.jiraTickets : [];
+  const createBtn = `<button type="button" class="jira-create-btn" data-jira-create>+ Create Jira ticket</button>`;
+
+  if (!tickets.length) {
     return `
       <div class="jira-block" data-jira-block>
-        <div class="jira-linked">
-          <a class="jira-key-link" href="#" data-jira-open title="Open ticket in Jira">⎘ ${escapeHtml(r.jiraKey)}</a>
-          ${chip}
-          <button type="button" class="jira-refresh" data-jira-refresh title="Refresh title & status">↻</button>
-          ${title}
-        </div>
+        ${createBtn}
       </div>`;
   }
+
+  const rows = tickets.map((t, i) => {
+    const statusChip = t.status
+      ? `<span class="jira-status-chip ${jiraStatusClass(t.status)}">${escapeHtml(t.status)}</span>`
+      : `<span class="jira-status-chip">—</span>`;
+    return `
+      <tr>
+        <td><a class="jira-key-link" href="#" data-jira-open data-idx="${i}" title="Open in Jira">${escapeHtml(t.key)}</a></td>
+        <td class="jira-td-title">${escapeHtml(t.title || "—")}</td>
+        <td>${statusChip}</td>
+      </tr>`;
+  }).join("");
+
   return `
     <div class="jira-block" data-jira-block>
-      <button type="button" class="jira-create-btn" data-jira-create>+ Create Jira ticket</button>
+      <div class="jira-table-head">
+        <span class="jira-table-label">Jira tickets (${tickets.length})</span>
+        <button type="button" class="jira-refresh" data-jira-refresh-all title="Refresh all statuses">↻</button>
+      </div>
+      <table class="jira-table">
+        <thead>
+          <tr><th>Key</th><th>Title</th><th>Status</th></tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${createBtn}
     </div>`;
 }
 
@@ -2260,15 +2390,15 @@ function renderRetailers() {
       // Jira controls act in place — don't open the retailer modal
       const jiraOpen = e.target.closest("[data-jira-open]");
       const jiraCreate = e.target.closest("[data-jira-create]");
-      const jiraRefresh = e.target.closest("[data-jira-refresh]");
-      if (jiraOpen || jiraCreate || jiraRefresh) {
+      const jiraRefreshAll = e.target.closest("[data-jira-refresh-all]");
+      if (jiraOpen || jiraCreate || jiraRefreshAll) {
         e.stopPropagation();
         e.preventDefault();
         const r = state.retailers.find(x => x.id == c.dataset.id);
         if (!r) return;
-        if (jiraOpen) handleJiraOpen(r);
-        else if (jiraCreate) handleJiraCreate(r, jiraCreate);
-        else if (jiraRefresh) handleJiraRefresh(r, jiraRefresh);
+        if (jiraOpen) handleJiraOpen(r, parseInt(jiraOpen.dataset.idx, 10));
+        else if (jiraCreate) handleJiraCreate(r);
+        else if (jiraRefreshAll) handleJiraRefreshAll(r, jiraRefreshAll);
         return;
       }
       openRetailerModal(state.retailers.find(r => r.id == c.dataset.id));
@@ -2276,58 +2406,141 @@ function renderRetailers() {
   });
 }
 
-function handleJiraOpen(r) {
-  if (r.jiraUrl) { window.open(r.jiraUrl, "_blank", "noopener"); return; }
-  // Fall back to building the browse URL from the base if we only stored the key.
-  jiraGetIssue(r.jiraKey).then(issue => {
-    r.jiraUrl = issue.url;
+function handleJiraOpen(r, idx) {
+  const t = (r.jiraTickets || [])[idx];
+  if (!t) return;
+  if (t.url) { window.open(t.url, "_blank", "noopener"); return; }
+  jiraGetIssue(t.key).then(issue => {
+    t.url = issue.url;
+    saveState();
     window.open(issue.url, "_blank", "noopener");
   }).catch(() => toast("Couldn't open ticket"));
 }
 
-async function handleJiraCreate(r, btn) {
-  btn.disabled = true;
-  btn.textContent = "Creating…";
+// Opens the styled Jira create modal for this retailer.
+function handleJiraCreate(r) {
+  openJiraModal(r);
+}
+
+// --- Jira create modal ---
+let jiraModalRetailer = null;
+let jiraModalBusy = false;
+
+function openJiraModal(r) {
+  jiraModalRetailer = r;
+  jiraModalBusy = false;
+  $("#jiraModalRetailer").textContent = r.name || "Retailer";
+  $("#jiraTaskName").value = "";
+  $("#jiraModalError").textContent = "";
+  $("#jiraModalError").classList.remove("show");
+
+  // Populate issue types: start with the configured default, then refine from Jira.
+  const sel = $("#jiraIssueType");
+  sel.innerHTML = `<option>${escapeHtml(JIRA_ISSUE_TYPE)}</option>`;
+  sel.disabled = true;
+
+  $("#jiraModalCreate").disabled = false;
+  $("#jiraModalCreate").textContent = "Create ticket";
+  $("#jiraModal").classList.add("show");
+  setTimeout(() => $("#jiraTaskName").focus(), 50);
+
+  // Fetch real issue types in the background; fall back silently to the default.
+  jiraFetchTypes().then(types => {
+    if (!types.length) { sel.disabled = false; return; }
+    sel.innerHTML = types.map(t =>
+      `<option ${t === JIRA_ISSUE_TYPE ? "selected" : ""}>${escapeHtml(t)}</option>`
+    ).join("");
+    sel.disabled = false;
+  }).catch(() => {
+    // Leave the single default option in place; user can still create.
+    sel.disabled = false;
+  });
+}
+
+function closeJiraModal() {
+  if (jiraModalBusy) return;   // don't close mid-request
+  $("#jiraModal").classList.remove("show");
+  jiraModalRetailer = null;
+}
+
+async function submitJiraModal() {
+  if (jiraModalBusy) return;
+  const r = jiraModalRetailer;
+  if (!r) return;
+  const name = $("#jiraTaskName").value.trim();
+  const errEl = $("#jiraModalError");
+  if (!name) {
+    errEl.textContent = "Please enter a task name.";
+    errEl.classList.add("show");
+    $("#jiraTaskName").focus();
+    return;
+  }
+  const issueType = $("#jiraIssueType").value;
+
+  jiraModalBusy = true;
+  const createBtn = $("#jiraModalCreate");
+  createBtn.disabled = true;
+  createBtn.textContent = "Creating…";
+  errEl.classList.remove("show");
+
   try {
-    const issue = await jiraCreateTicket(r);
-    r.jiraKey = issue.key;
-    r.jiraUrl = issue.url;
-    r.jiraTitle = issue.title;
-    r.jiraStatus = issue.status;
+    const issue = await jiraCreateTicket(r, name, issueType);
+    if (!Array.isArray(r.jiraTickets)) r.jiraTickets = [];
+    r.jiraTickets.push({
+      key: issue.key,
+      url: issue.url,
+      title: issue.title,
+      status: issue.status,
+    });
     saveState();
+    jiraModalBusy = false;
+    closeJiraModal();
     renderRetailers();
     toast("Created " + issue.key);
   } catch (e) {
     console.warn(e);
-    btn.disabled = false;
-    btn.textContent = "+ Create Jira ticket";
-    toast(jiraErrorText(e));
+    jiraModalBusy = false;
+    createBtn.disabled = false;
+    createBtn.textContent = "Create ticket";
+    errEl.textContent = jiraErrorText(e);
+    errEl.classList.add("show");
   }
 }
 
-async function handleJiraRefresh(r, btn) {
-  const original = btn.textContent;
+$("#jiraModalClose").addEventListener("click", closeJiraModal);
+$("#jiraModalCancel").addEventListener("click", closeJiraModal);
+$("#jiraModal").addEventListener("click", (e) => { if (e.target.id === "jiraModal") closeJiraModal(); });
+$("#jiraModalCreate").addEventListener("click", submitJiraModal);
+$("#jiraTaskName").addEventListener("keydown", (e) => { if (e.key === "Enter") submitJiraModal(); });
+
+async function handleJiraRefreshAll(r, btn) {
+  const tickets = r.jiraTickets || [];
+  if (!tickets.length) return;
   btn.textContent = "…";
-  try {
-    const issue = await jiraGetIssue(r.jiraKey);
-    r.jiraTitle = issue.title;
-    r.jiraStatus = issue.status;
-    r.jiraUrl = issue.url;
-    saveState();
-    renderRetailers();
-    toast("Updated " + issue.key);
-  } catch (e) {
-    console.warn(e);
-    btn.textContent = original;
-    toast(jiraErrorText(e));
+  let ok = 0;
+  for (const t of tickets) {
+    try {
+      const issue = await jiraGetIssue(t.key);
+      t.title = issue.title;
+      t.status = issue.status;
+      t.url = issue.url;
+      ok++;
+    } catch (e) {
+      console.warn("Refresh failed for " + t.key, e);
+    }
   }
+  saveState();
+  renderRetailers();
+  toast(ok === tickets.length ? "All tickets updated" : `Updated ${ok} of ${tickets.length}`);
 }
 
 function jiraErrorText(e) {
   const msg = String(e && e.message ? e.message : e);
   if (msg.includes("not configured")) return "Jira isn't set up in Script Properties yet";
+  if (msg.includes("Redeploy")) return "Redeploy Code.gs as a new version — backend is out of date";
   if (msg.includes("not found")) return "That ticket no longer exists in Jira";
-  return "Jira error — check the console";
+  if (msg.includes("project")) return "Check JIRA_PROJECT_KEY — that project key looks wrong";
+  return "Jira error: " + msg.slice(0, 80);
 }
 
 function retailerForm(r) {
